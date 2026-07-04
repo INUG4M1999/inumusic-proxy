@@ -209,17 +209,9 @@ Future<void> _handleRequest(HttpRequest request) async {
     return;
   }
 
-  // CORS: Permitir orígenes de producción (Netlify) y desarrollo local
+  // CORS: Permitir cualquier origen en producción, ya que la firma de seguridad X-InuMusic-Signature valida la autenticidad
   final origin = request.headers.value('origin') ?? '*';
-  final allowedOrigins = [
-    'http://127.0.0.1:8080',
-    'http://localhost:8080',
-  ];
-  // Permitir cualquier origen de Netlify (*.netlify.app) y orígenes locales conocidos
-  final isAllowed = allowedOrigins.contains(origin) ||
-      origin.endsWith('.netlify.app') ||
-      origin == '*';
-  request.response.headers.add('Access-Control-Allow-Origin', isAllowed ? origin : allowedOrigins.first);
+  request.response.headers.add('Access-Control-Allow-Origin', origin);
   request.response.headers.add('Access-Control-Allow-Methods', 'GET, OPTIONS');
   request.response.headers.add('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, X-InuMusic-Signature, X-InuMusic-Timestamp, X-InuMusic-Client');
 
@@ -485,6 +477,72 @@ Future<void> _handleProxy(HttpRequest request, Map<String, String> params) async
   }
 }
 
+Future<String?> _getCobaltAudioUrl(String videoId) async {
+  try {
+    print('📡 Intentando extraer audio con Cobalt API para video: $videoId...');
+    final response = await http.post(
+      Uri.parse('https://api.cobalt.tools/'),
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: json.encode({
+        'url': 'https://www.youtube.com/watch?v=$videoId',
+        'downloadMode': 'audio',
+        'aFormat': 'mp3',
+      }),
+    ).timeout(const Duration(seconds: 10));
+
+    if (response.statusCode == 200) {
+      final data = json.decode(response.body) as Map<String, dynamic>;
+      final streamUrl = data['url'] as String?;
+      if (streamUrl != null && streamUrl.isNotEmpty) {
+        print('✅ Cobalt API obtuvo con éxito la URL del stream.');
+        return streamUrl;
+      }
+    }
+    print('⚠️ Cobalt API falló (status ${response.statusCode}): ${response.body}');
+  } catch (e) {
+    print('⚠️ Excepción en Cobalt API: $e');
+  }
+  return null;
+}
+
+Future<String?> _getPipedAudioUrl(String videoId) async {
+  final instances = [
+    'https://pipedapi.kavin.rocks',
+    'https://pipedapi.coluble.net',
+    'https://pipedapi.tokhmi.xyz',
+    'https://api.piped.yt',
+    'https://piped-api.lunar.icu',
+  ];
+
+  for (final api in instances) {
+    try {
+      print('📡 Intentando extraer audio con Piped API ($api) para video: $videoId...');
+      final response = await http.get(
+        Uri.parse('$api/streams/$videoId'),
+      ).timeout(const Duration(seconds: 6));
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body) as Map<String, dynamic>;
+        final audioStreams = data['audioStreams'] as List<dynamic>?;
+        if (audioStreams != null && audioStreams.isNotEmpty) {
+          final url = audioStreams.first['url'] as String?;
+          if (url != null && url.isNotEmpty) {
+            print('✅ Piped API ($api) obtuvo con éxito la URL del stream.');
+            return url;
+          }
+        }
+      }
+      print('⚠️ Piped API ($api) retornó status ${response.statusCode}');
+    } catch (e) {
+      print('⚠️ Excepción en Piped API ($api): $e');
+    }
+  }
+  return null;
+}
+
 Future<String?> _getAudioUrl(String videoId, {bool skipYoutubeExplode = false}) async {
   final cached = _streamCache[videoId];
   if (cached != null && !cached.isExpired) {
@@ -504,12 +562,27 @@ Future<String?> _getAudioUrl(String videoId, {bool skipYoutubeExplode = false}) 
         return url;
       }
     } catch (e) {
-      print('⚠️ youtube_explode failed: $e. Falling back to yt-dlp...');
+      print('⚠️ youtube_explode failed: $e. Falling back...');
     } finally {
       yt.close();
     }
   }
 
+  // Cobalt API
+  final cobaltUrl = await _getCobaltAudioUrl(videoId);
+  if (cobaltUrl != null) {
+    _streamCache[videoId] = _CachedStream(cobaltUrl);
+    return cobaltUrl;
+  }
+
+  // Piped API
+  final pipedUrl = await _getPipedAudioUrl(videoId);
+  if (pipedUrl != null) {
+    _streamCache[videoId] = _CachedStream(pipedUrl);
+    return pipedUrl;
+  }
+
+  // yt-dlp
   final clients = ['default', 'web', 'android', 'ios', 'mweb'];
   for (final client in clients) {
     print('📡 Running yt-dlp for video: $videoId with player_client=$client...');
@@ -538,13 +611,7 @@ Future<String?> _getAudioUrl(String videoId, {bool skipYoutubeExplode = false}) 
           print('✅ yt-dlp ($client) successfully retrieved stream URL.');
           _streamCache[videoId] = _CachedStream(url);
           return url;
-        } else {
-          print('📡 yt-dlp ($client) returned invalid url: "$url"');
         }
-      } else {
-        final stderrStr = result.stderr.toString().trim();
-        final firstLine = stderrStr.split('\n').first;
-        print('⚠️ yt-dlp ($client) failed. STDERR: $firstLine');
       }
     } catch (e) {
       print('❌ Exception running yt-dlp ($client): $e');
@@ -733,9 +800,9 @@ bool _verifySignature(HttpRequest request) {
     final int timestamp = int.parse(timestampStr);
     final int now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
-    // Validar que la marca de tiempo de la firma no difiera en más de 60 segundos (evita ataques de replay/reproducción diferida)
-    if ((now - timestamp).abs() > 60) {
-      print('🔒 Saludo de seguridad rechazado: Firma caducada por ${ (now - timestamp).abs() } segundos.');
+    // Aumentar la tolerancia a 15 minutos (900 segundos) para mitigar el desfase de reloj (NTP/Docker/Timezone) en servidores en la nube
+    if ((now - timestamp).abs() > 900) {
+      print('🔒 Saludo de seguridad rechazado: Firma caducada por ${ (now - timestamp).abs() } segundos (tolerancia 900s).');
       return false;
     }
 
