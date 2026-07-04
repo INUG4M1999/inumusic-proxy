@@ -344,17 +344,31 @@ Future<void> _handleStream(HttpRequest request, Map<String, String> params) asyn
     final item = data['items'][0];
     final videoId = item['id']['videoId'];
 
-    // Devolver la URL del proxy para retransmitir
-    final host = request.headers.value('host') ?? 'localhost:9090';
-    // Extraemos el protocolo desde X-Forwarded-Proto (si está detrás de Render/Netlify)
-    final proto = request.headers.value('x-forwarded-proto') ?? 'http';
-    final proxyUrl = '$proto://$host/proxy?video=$videoId';
+    // Obtener la URL de audio real
+    final audioUrl = await _getAudioUrl(videoId);
+    String streamUrl = '';
 
-    print('✅ Video: $videoId -> proxy: $proxyUrl');
+    if (audioUrl != null && 
+        (audioUrl.contains('cobalt.tools') || 
+         audioUrl.contains('piped') || 
+         audioUrl.contains('kavin.rocks') || 
+         audioUrl.contains('coluble.net') || 
+         audioUrl.contains('tokhmi.xyz') || 
+         audioUrl.contains('lunar.icu'))) {
+      // Es un CDN público con CORS habilitado y soporte de Range nativo, devolver directamente para ahorrar ancho de banda y latencia
+      streamUrl = audioUrl;
+      print('✅ Video: $videoId -> CDN Directo: $streamUrl');
+    } else {
+      // Es un stream directo de YouTube con CORS restrictivo, retransmitirlo por nuestro proxy
+      final host = request.headers.value('host') ?? 'localhost:9090';
+      final proto = request.headers.value('x-forwarded-proto') ?? 'http';
+      streamUrl = '$proto://$host/proxy?video=$videoId';
+      print('✅ Video: $videoId -> proxy: $streamUrl');
+    }
 
     request.response.headers.contentType = ContentType.json;
     request.response.write(json.encode({
-      'streamUrl': proxyUrl,
+      'streamUrl': streamUrl,
       'title': item['snippet']['title'],
       'author': item['snippet']['channelTitle'],
       'thumbnail': item['snippet']['thumbnails']['high']['url'],
@@ -370,12 +384,8 @@ Future<void> _handleStream(HttpRequest request, Map<String, String> params) asyn
 
 /// Retransmite el audio al navegador (proxy CORS)
 Future<void> _handleProxy(HttpRequest request, Map<String, String> params) async {
-  // Añadir CORS específico para el endpoint /proxy (no tiene verificación de firma)
+  // Para el endpoint /proxy, CORS se maneja aquí de forma directa
   final origin = request.headers.value('origin') ?? '*';
-  final allowedOrigins = ['http://127.0.0.1:8080', 'http://localhost:8080'];
-  final isAllowed = allowedOrigins.contains(origin) || origin.endsWith('.netlify.app') || origin == '*';
-  // No re-añadir si ya se estableció en _handleRequest — pero /proxy salta la firma
-  // Los headers CORS ya se añaden en _handleRequest, así que no necesitamos duplicar
 
   final videoId = params['video'] ?? '';
   if (videoId.isEmpty) {
@@ -411,13 +421,21 @@ Future<void> _handleProxy(HttpRequest request, Map<String, String> params) async
   try {
     final client = http.Client();
     final audioRequest = http.Request('GET', Uri.parse(audioUrl));
+    
+    // Soporte de Range Requests para compatibilidad móvil y Chrome/Safari en producción
+    final rangeHeader = request.headers.value('range');
+    if (rangeHeader != null) {
+      audioRequest.headers['Range'] = rangeHeader;
+      print('📡 Solicitud de rango recibida: $rangeHeader');
+    }
+
     // Pasar headers de User-Agent para que YouTube no rechace
     audioRequest.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
     final streamedResponse = await client.send(audioRequest).timeout(const Duration(seconds: 30));
 
-    if (streamedResponse.statusCode != 200) {
+    if (streamedResponse.statusCode != 200 && streamedResponse.statusCode != 206) {
       _streamCache.remove(videoId);
-      print('  ⚠️ URL expirada (status ${streamedResponse.statusCode}), reintentando...');
+      print('  ⚠️ URL expirada o error (status ${streamedResponse.statusCode}), reintentando...');
       
       final newUrl = await _getAudioUrl(videoId, skipYoutubeExplode: true);
       if (newUrl == null) {
@@ -428,38 +446,49 @@ Future<void> _handleProxy(HttpRequest request, Map<String, String> params) async
       }
       
       final retryRequest = http.Request('GET', Uri.parse(newUrl));
+      if (rangeHeader != null) {
+        retryRequest.headers['Range'] = rangeHeader;
+      }
       retryRequest.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
       final retryResponse = await client.send(retryRequest).timeout(const Duration(seconds: 30));
       
-      if (retryResponse.statusCode != 200) {
+      if (retryResponse.statusCode != 200 && retryResponse.statusCode != 206) {
         request.response.statusCode = 503;
         await request.response.close();
         client.close();
         return;
       }
       
-      request.response.statusCode = 200;
-      request.response.headers.add('Content-Type', 'audio/mp4');
-      if (retryResponse.contentLength != null && retryResponse.contentLength! > 0) {
-        request.response.headers.add('Content-Length', retryResponse.contentLength.toString());
-      }
-      request.response.headers.add('Accept-Ranges', 'bytes');
+      request.response.statusCode = retryResponse.statusCode;
+      retryResponse.headers.forEach((name, values) {
+        if (name.toLowerCase() == 'content-type' || 
+            name.toLowerCase() == 'content-length' || 
+            name.toLowerCase() == 'content-range' || 
+            name.toLowerCase() == 'accept-ranges') {
+          request.response.headers.add(name, values.join(', '));
+        }
+      });
+      request.response.headers.add('Access-Control-Allow-Origin', origin);
       
       print('📡 Retransmitiendo audio (retry)...');
       await request.response.addStream(retryResponse.stream);
       await request.response.close();
       client.close();
-      print('✅ Completado: $videoId');
+      print('✅ Completado (retry): $videoId');
       return;
     }
 
-    // Configurar respuesta
-    request.response.statusCode = 200;
-    request.response.headers.add('Content-Type', 'audio/mp4');
-    if (streamedResponse.contentLength != null && streamedResponse.contentLength! > 0) {
-      request.response.headers.add('Content-Length', streamedResponse.contentLength.toString());
-    }
-    request.response.headers.add('Accept-Ranges', 'bytes');
+    // Configurar respuesta con headers originales (incluyendo Content-Range si es 206)
+    request.response.statusCode = streamedResponse.statusCode;
+    streamedResponse.headers.forEach((name, values) {
+      if (name.toLowerCase() == 'content-type' || 
+          name.toLowerCase() == 'content-length' || 
+          name.toLowerCase() == 'content-range' || 
+          name.toLowerCase() == 'accept-ranges') {
+        request.response.headers.add(name, values.join(', '));
+      }
+    });
+    request.response.headers.add('Access-Control-Allow-Origin', origin);
 
     print('📡 Retransmitiendo audio (${streamedResponse.contentLength ?? "desconocido"} bytes)...');
     await request.response.addStream(streamedResponse.stream);
