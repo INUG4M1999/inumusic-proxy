@@ -1,0 +1,12 @@
+name: cors_proxy
+description: Proxy CORS local para retransmitir streams de audio de YouTube
+version: 1.0.0
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  shelf: ^1.4.1
+  shelf_cors_headers: ^0.1.5
+  http: ^1.2.1
+  youtube_explode_dart: ^3.1.0
