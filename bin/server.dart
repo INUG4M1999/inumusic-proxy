@@ -384,7 +384,7 @@ Future<void> _handleStream(HttpRequest request, Map<String, String> params) asyn
 
 /// Retransmite el audio al navegador (proxy CORS)
 Future<void> _handleProxy(HttpRequest request, Map<String, String> params) async {
-  // Para el endpoint /proxy, CORS se maneja aquí de forma directa
+  // Añadir CORS específico para el endpoint /proxy (no tiene verificación de firma)
   final origin = request.headers.value('origin') ?? '*';
 
   final videoId = params['video'] ?? '';
@@ -460,12 +460,12 @@ Future<void> _handleProxy(HttpRequest request, Map<String, String> params) async
       }
       
       request.response.statusCode = retryResponse.statusCode;
-      retryResponse.headers.forEach((name, values) {
+      retryResponse.headers.forEach((name, value) {
         if (name.toLowerCase() == 'content-type' || 
             name.toLowerCase() == 'content-length' || 
             name.toLowerCase() == 'content-range' || 
             name.toLowerCase() == 'accept-ranges') {
-          request.response.headers.add(name, values.join(', '));
+          request.response.headers.add(name, value);
         }
       });
       request.response.headers.add('Access-Control-Allow-Origin', origin);
@@ -480,12 +480,12 @@ Future<void> _handleProxy(HttpRequest request, Map<String, String> params) async
 
     // Configurar respuesta con headers originales (incluyendo Content-Range si es 206)
     request.response.statusCode = streamedResponse.statusCode;
-    streamedResponse.headers.forEach((name, values) {
+    streamedResponse.headers.forEach((name, value) {
       if (name.toLowerCase() == 'content-type' || 
           name.toLowerCase() == 'content-length' || 
           name.toLowerCase() == 'content-range' || 
           name.toLowerCase() == 'accept-ranges') {
-        request.response.headers.add(name, values.join(', '));
+        request.response.headers.add(name, value);
       }
     });
     request.response.headers.add('Access-Control-Allow-Origin', origin);
