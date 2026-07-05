@@ -194,7 +194,14 @@ Future<String> _getSpotifyAccessToken() async {
 
 Future<void> _handleRequest(HttpRequest request) async {
   final path = request.uri.path;
-  final String clientIp = request.connectionInfo?.remoteAddress.address ?? 'unknown';
+  String clientIp = request.headers.value('x-forwarded-for') ?? 
+                    request.headers.value('x-real-ip') ?? 
+                    request.headers.value('cf-connecting-ip') ?? 
+                    request.connectionInfo?.remoteAddress.address ?? 
+                    'unknown';
+  if (clientIp.contains(',')) {
+    clientIp = clientIp.split(',').first.trim();
+  }
 
   // Verificar Rate Limiting (máximo 30 peticiones por minuto, exceptuando /healthz)
   if (path != '/healthz' && _isRateLimited(clientIp)) {
