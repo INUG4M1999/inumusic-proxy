@@ -317,31 +317,6 @@ Future<void> _handleSearch(HttpRequest request, Map<String, String> params) asyn
   }
 }
 
-/// Obtiene stream ultra rápido de Saavn (bypass total de bloqueos de YouTube)
-Future<String?> _getSaavnStreamUrl(String query) async {
-  try {
-    final response = await http.get(Uri.parse('https://saavn.echomusic.fun/api/search/songs?query=${Uri.encodeComponent(query)}')).timeout(const Duration(seconds: 4));
-    if (response.statusCode == 200) {
-      final data = json.decode(response.body);
-      if (data['success'] == true) {
-        final results = data['data']['results'] as List<dynamic>?;
-        if (results != null && results.isNotEmpty) {
-          final song = results.first;
-          final downloadUrls = song['downloadUrl'] as List<dynamic>?;
-          if (downloadUrls != null && downloadUrls.isNotEmpty) {
-            // Find 320kbps or the last one (highest quality)
-            final highestQuality = downloadUrls.last['url'];
-            return highestQuality;
-          }
-        }
-      }
-    }
-  } catch (e) {
-    print('⚠️ Error en JioSaavn: $e');
-  }
-  return null;
-}
-
 /// Obtiene el video y devuelve la url de retransmisión
 Future<void> _handleStream(HttpRequest request, Map<String, String> params) async {
   final rawTitle = params['title'] ?? '';
@@ -355,26 +330,10 @@ Future<void> _handleStream(HttpRequest request, Map<String, String> params) asyn
     return;
   }
 
-  print('🎶 Buscando audio para: $title - $artist');
+  print('🎶 Buscando video para: $title - $artist');
   final searchQuery = '$title $artist';
 
   try {
-    // 1. INTENTO SUPREMO: SAAVN (0 bloqueos, CORS nativo, CDN ultra rápido)
-    final saavnUrl = await _getSaavnStreamUrl(searchQuery);
-    if (saavnUrl != null && saavnUrl.isNotEmpty) {
-      print('✅ ENCONTRADO EN SAAVN! Bypass total de YouTube: $saavnUrl');
-      request.response.headers.contentType = ContentType.json;
-      request.response.write(json.encode({
-        'streamUrl': saavnUrl,
-        'title': title,
-        'author': artist,
-        'thumbnail': '',
-      }));
-      await request.response.close();
-      return;
-    }
-
-    print('⚠️ Saavn falló, retrocediendo a YouTube Proxy para: $searchQuery');
     final url = Uri.parse('https://www.googleapis.com/youtube/v3/search?part=snippet&maxResults=1&q=${Uri.encodeComponent(searchQuery)}&type=video&key=$_youtubeApiKey');
     final response = await http.get(url);
 
