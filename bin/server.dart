@@ -203,6 +203,7 @@ Future<void> _handleRequest(HttpRequest request) async {
     clientIp = clientIp.split(',').first.trim();
   }
 
+
   // Verificar Rate Limiting (máximo 30 peticiones por minuto, exceptuando /healthz)
   if (path != '/healthz' && _isRateLimited(clientIp)) {
     print('🛑 TASA EXCEDIDA: IP $clientIp bloqueada temporalmente por exceso de peticiones.');
@@ -393,6 +394,10 @@ Future<void> _handleStream(HttpRequest request, Map<String, String> params) asyn
 Future<void> _handleProxy(HttpRequest request, Map<String, String> params) async {
   // Añadir CORS específico para el endpoint /proxy (no tiene verificación de firma)
   final origin = request.headers.value('origin') ?? '*';
+  final allowedOrigins = ['http://127.0.0.1:8080', 'http://localhost:8080'];
+  final isAllowed = allowedOrigins.contains(origin) || origin.endsWith('.netlify.app') || origin == '*';
+  // No re-añadir si ya se estableció en _handleRequest — pero /proxy salta la firma
+  // Los headers CORS ya se añaden en _handleRequest, así que no necesitamos duplicar
 
   final videoId = params['video'] ?? '';
   if (videoId.isEmpty) {
@@ -604,18 +609,21 @@ Future<String?> _getAudioUrl(String videoId, {bool skipYoutubeExplode = false}) 
     }
   }
 
-  // Cobalt API
-  final cobaltUrl = await _getCobaltAudioUrl(videoId);
-  if (cobaltUrl != null) {
-    _streamCache[videoId] = _CachedStream(cobaltUrl);
-    return cobaltUrl;
-  }
+  // Si tenemos cookies, yt-dlp es la opción más segura y rápida (saltamos APIs públicas caídas)
+  if (_cookiesPath == null) {
+    // Cobalt API (rápido, pero suele bloquear)
+    final cobaltUrl = await _getCobaltAudioUrl(videoId);
+    if (cobaltUrl != null) {
+      _streamCache[videoId] = _CachedStream(cobaltUrl);
+      return cobaltUrl;
+    }
 
-  // Piped API
-  final pipedUrl = await _getPipedAudioUrl(videoId);
-  if (pipedUrl != null) {
-    _streamCache[videoId] = _CachedStream(pipedUrl);
-    return pipedUrl;
+    // Piped API (lento y con timeouts)
+    final pipedUrl = await _getPipedAudioUrl(videoId);
+    if (pipedUrl != null) {
+      _streamCache[videoId] = _CachedStream(pipedUrl);
+      return pipedUrl;
+    }
   }
 
   // yt-dlp
