@@ -317,6 +317,31 @@ Future<void> _handleSearch(HttpRequest request, Map<String, String> params) asyn
   }
 }
 
+/// Obtiene stream ultra rápido de Saavn (bypass total de bloqueos de YouTube)
+Future<String?> _getSaavnStreamUrl(String query) async {
+  try {
+    final response = await http.get(Uri.parse('https://saavn.echomusic.fun/api/search/songs?query=${Uri.encodeComponent(query)}')).timeout(const Duration(seconds: 4));
+    if (response.statusCode == 200) {
+      final data = json.decode(response.body);
+      if (data['success'] == true) {
+        final results = data['data']['results'] as List<dynamic>?;
+        if (results != null && results.isNotEmpty) {
+          final song = results.first;
+          final downloadUrls = song['downloadUrl'] as List<dynamic>?;
+          if (downloadUrls != null && downloadUrls.isNotEmpty) {
+            // Find 320kbps or the last one (highest quality)
+            final highestQuality = downloadUrls.last['url'];
+            return highestQuality;
+          }
+        }
+      }
+    }
+  } catch (e) {
+    print('⚠️ Error en JioSaavn: $e');
+  }
+  return null;
+}
+
 /// Obtiene el video y devuelve la url de retransmisión
 Future<void> _handleStream(HttpRequest request, Map<String, String> params) async {
   final rawTitle = params['title'] ?? '';
@@ -330,10 +355,26 @@ Future<void> _handleStream(HttpRequest request, Map<String, String> params) asyn
     return;
   }
 
-  print('🎶 Buscando video para: $title - $artist');
+  print('🎶 Buscando audio para: $title - $artist');
   final searchQuery = '$title $artist';
 
   try {
+    // 1. INTENTO SUPREMO: SAAVN (0 bloqueos, CORS nativo, CDN ultra rápido)
+    final saavnUrl = await _getSaavnStreamUrl(searchQuery);
+    if (saavnUrl != null && saavnUrl.isNotEmpty) {
+      print('✅ ENCONTRADO EN SAAVN! Bypass total de YouTube: $saavnUrl');
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(json.encode({
+        'streamUrl': saavnUrl,
+        'title': title,
+        'author': artist,
+        'thumbnail': '',
+      }));
+      await request.response.close();
+      return;
+    }
+
+    print('⚠️ Saavn falló, retrocediendo a YouTube Proxy para: $searchQuery');
     final url = Uri.parse('https://www.googleapis.com/youtube/v3/search?part=snippet&maxResults=1&q=${Uri.encodeComponent(searchQuery)}&type=video&key=$_youtubeApiKey');
     final response = await http.get(url);
 
@@ -609,22 +650,7 @@ Future<String?> _getAudioUrl(String videoId, {bool skipYoutubeExplode = false}) 
     }
   }
 
-  // Si tenemos cookies, yt-dlp es la opción más segura y rápida (saltamos APIs públicas caídas)
-  if (_cookiesPath == null) {
-    // Cobalt API (rápido, pero suele bloquear)
-    final cobaltUrl = await _getCobaltAudioUrl(videoId);
-    if (cobaltUrl != null) {
-      _streamCache[videoId] = _CachedStream(cobaltUrl);
-      return cobaltUrl;
-    }
-
-    // Piped API (lento y con timeouts)
-    final pipedUrl = await _getPipedAudioUrl(videoId);
-    if (pipedUrl != null) {
-      _streamCache[videoId] = _CachedStream(pipedUrl);
-      return pipedUrl;
-    }
-  }
+  // yt-dlp (intentar con cookies o sin ellas)
 
   // yt-dlp
   final clients = ['default', 'web', 'android', 'ios', 'mweb'];
@@ -658,9 +684,26 @@ Future<String?> _getAudioUrl(String videoId, {bool skipYoutubeExplode = false}) 
         }
       }
     } catch (e) {
-      print('❌ Exception running yt-dlp ($client): $e');
+      print('⚠️ yt-dlp error con client $client: $e');
     }
   }
+
+  // Si yt-dlp falla (incluso con cookies), intentar APIs públicas como último recurso antes de iTunes
+
+  // Cobalt API (rápido, pero suele bloquear)
+  final cobaltUrl = await _getCobaltAudioUrl(videoId);
+  if (cobaltUrl != null) {
+    _streamCache[videoId] = _CachedStream(cobaltUrl);
+    return cobaltUrl;
+  }
+
+  // Piped API (lento y con timeouts)
+  final pipedUrl = await _getPipedAudioUrl(videoId);
+  if (pipedUrl != null) {
+    _streamCache[videoId] = _CachedStream(pipedUrl);
+    return pipedUrl;
+  }
+
   return null;
 }
 
