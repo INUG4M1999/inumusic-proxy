@@ -1,0 +1,11 @@
+.dart_tool/
+build/
+.packages
+.pub/
+.pub-cache/
+.flutter-plugins
+.flutter-plugins-dependencies
+config.json
+*.exe
+*.log
+cookies.txt
